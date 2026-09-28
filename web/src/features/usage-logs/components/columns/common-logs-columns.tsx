@@ -47,9 +47,15 @@ import {
 import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { taskUsageUnitLabel } from '@/features/pricing/lib/task-price-display'
 import type { BillingUsageSchema } from '@/features/pricing/types'
+import { toIntlLocale } from '@/i18n/languages'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
-import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
+import {
+  formatCacheHitRate,
+  formatLogQuota,
+  formatTimestampToDate,
+  getCacheHitRate,
+} from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
@@ -343,7 +349,8 @@ export function useCommonLogsColumns(
   isRoot: boolean,
   showBillingSource = false
 ): ColumnDef<UsageLog>[] {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const intlLocale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const currency = useSystemConfigStore((state) => state.config.currency)
   return useMemo(() => {
     const columns: ColumnDef<UsageLog>[] = [
@@ -755,6 +762,21 @@ export function useCommonLogsColumns(
                       ↑ {cacheWriteTokens.toLocaleString()}
                     </span>
                   )}
+                  {(log.cache_hit_tokens > 0 || cacheWriteTokens > 0) &&
+                    getCacheHitRate(
+                      log.cache_hit_tokens,
+                      log.total_input_tokens
+                    ) != null && (
+                      <span className='text-muted-foreground/60 tabular-nums'>
+                        (
+                        {formatCacheHitRate(
+                          log.cache_hit_tokens,
+                          log.total_input_tokens,
+                          intlLocale
+                        )}
+                        )
+                      </span>
+                    )}
                 </div>
               )}
             </div>

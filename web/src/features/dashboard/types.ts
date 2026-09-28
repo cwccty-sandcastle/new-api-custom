@@ -31,6 +31,8 @@ export interface QuotaDataItem {
   token_used?: number
   count?: number
   quota?: number
+  cache_hit_tokens?: number
+  total_input_tokens?: number
 }
 
 export interface FlowQuotaDataItem {
@@ -193,7 +195,7 @@ export interface DashboardFilters {
 
 export type ConsumptionDistributionChartType = 'bar' | 'area'
 
-export type ModelAnalyticsChartTab = 'trend' | 'proportion' | 'top'
+export type ModelAnalyticsChartTab = 'trend' | 'proportion' | 'top' | 'cache'
 
 export interface DashboardChartPreferences {
   consumptionDistributionChart: ConsumptionDistributionChartType
@@ -242,6 +244,7 @@ export interface ProcessedChartData {
   spec_area: VChartSpec
   spec_model_line: VChartSpec
   spec_rank_bar: VChartSpec
+  spec_cache_hit_rate: VChartSpec
   totalQuotaDisplay: string
   totalCountDisplay: string
 }

@@ -33,6 +33,7 @@ import type {
   ModelAnalyticsChartTab,
   QuotaDataItem,
 } from '@/features/dashboard/types'
+import { toIntlLocale } from '@/i18n/languages'
 import { useThemeRadiusPx } from '@/lib/theme-radius'
 import type { TimeGranularity } from '@/lib/time'
 import { VCHART_OPTION } from '@/lib/vchart'
@@ -41,12 +42,17 @@ let themeManagerPromise: Promise<
   (typeof import('@visactor/vchart'))['ThemeManager']
 > | null = null
 
-type ChartSpecKey = 'spec_model_line' | 'spec_pie' | 'spec_rank_bar'
+type ChartSpecKey =
+  | 'spec_model_line'
+  | 'spec_pie'
+  | 'spec_rank_bar'
+  | 'spec_cache_hit_rate'
 
 const CHART_SPEC_KEYS: Record<ModelAnalyticsChartTab, ChartSpecKey> = {
   trend: 'spec_model_line',
   proportion: 'spec_pie',
   top: 'spec_rank_bar',
+  cache: 'spec_cache_hit_rate',
 }
 
 interface ModelChartsProps {
@@ -57,7 +63,8 @@ interface ModelChartsProps {
 }
 
 export function ModelCharts(props: ModelChartsProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const intlLocale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const { resolvedTheme } = useTheme()
   const { customization } = useThemeCustomization()
   const chartRadius = useThemeRadiusPx(
@@ -102,9 +109,10 @@ export function ModelCharts(props: ModelChartsProps) {
         props.loading ? [] : props.data,
         timeGranularity,
         t,
-        chartRadius
+        chartRadius,
+        intlLocale
       ),
-    [props.data, props.loading, timeGranularity, t, chartRadius]
+    [props.data, props.loading, timeGranularity, t, chartRadius, intlLocale]
   )
 
   const spec = chartData[CHART_SPEC_KEYS[activeTab]]

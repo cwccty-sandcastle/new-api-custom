@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
+  flexRender,
   getCoreRowModel,
   useReactTable,
   type VisibilityState,
@@ -96,6 +97,35 @@ function renderLogs(props: Parameters<typeof Fixture>[0] = {}) {
     </QueryClientProvider>
   )
 }
+
+function renderTokensCell(entry: UsageLog) {
+  function TokensCell() {
+    const table = useReactTable({
+      data: [entry],
+      columns: useCommonLogsColumns(true, false),
+      getCoreRowModel: getCoreRowModel(),
+    })
+    const cell = table
+      .getRowModel()
+      .rows[0].getAllCells()
+      .find((item) => item.column.id === 'prompt_tokens')
+    if (!cell) throw new Error('The log must have a tokens column')
+    return flexRender(cell.column.columnDef.cell, cell.getContext())
+  }
+  return render(
+    <QueryClientProvider
+      client={
+        new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      }
+    >
+      <UsageLogsProvider>
+        <TokensCell />
+      </UsageLogsProvider>
+    </QueryClientProvider>
+  )
+}
+
+const RATE_PATTERN = /\(\d+(?:\.\d+)?%\)/
 
 it('shows model mismatch evidence when tapping the mobile model badge', async () => {
   const user = userEvent.setup()
@@ -224,6 +254,71 @@ it('keeps input, output and cache quantities readable without empty metric cells
   expect(screen.getByText('Output')).toBeVisible()
   expect(screen.getByText(/300/)).toBeVisible()
   expect(screen.getByText('Cache ↑ 200')).toBeVisible()
+})
+
+it('shows the token-weighted cache hit rate beside cache tokens in the tokens cell', () => {
+  renderTokensCell({
+    ...log,
+    prompt_tokens: 1000,
+    completion_tokens: 500,
+    cache_hit_tokens: 640,
+    total_input_tokens: 1000,
+    other: JSON.stringify({ cache_tokens: 640 }),
+  })
+  expect(screen.getByText('(64%)')).toBeVisible()
+})
+
+it('shows 0% in the tokens cell when input exists but nothing was cached', () => {
+  renderTokensCell({
+    ...log,
+    prompt_tokens: 1200,
+    completion_tokens: 500,
+    cache_hit_tokens: 0,
+    total_input_tokens: 1200,
+    other: JSON.stringify({ cache_creation_tokens_5m: 200 }),
+  })
+  expect(screen.getByText('(0%)')).toBeVisible()
+})
+
+it('omits the rate in the tokens cell when no input total was recorded', () => {
+  renderTokensCell({
+    ...log,
+    prompt_tokens: 1200,
+    completion_tokens: 500,
+    other: JSON.stringify({ cache_tokens: 300 }),
+  })
+  expect(screen.getByText(/300/)).toBeVisible()
+  expect(screen.queryByText(RATE_PATTERN)).not.toBeInTheDocument()
+})
+
+it('omits the rate in the tokens cell for rows without cache tokens', () => {
+  renderTokensCell({
+    ...log,
+    prompt_tokens: 1000,
+    completion_tokens: 500,
+    cache_hit_tokens: 0,
+    total_input_tokens: 1000,
+    other: JSON.stringify({ model_ratio: 1 }),
+  })
+  expect(screen.queryByText(RATE_PATTERN)).not.toBeInTheDocument()
+})
+
+it('shows the cache hit rate on the mobile log card', () => {
+  renderLogs({
+    logs: [
+      {
+        ...log,
+        prompt_tokens: 1000,
+        completion_tokens: 500,
+        cache_hit_tokens: 640,
+        total_input_tokens: 1000,
+        other: JSON.stringify({ cache_tokens: 640 }),
+      },
+    ],
+  })
+  const rate = screen.getByText('64%')
+  expect(rate).toBeVisible()
+  expect(rate.parentElement).toHaveTextContent('Cache Hit Rate')
 })
 
 it('shows the established empty state when no logs exist', () => {

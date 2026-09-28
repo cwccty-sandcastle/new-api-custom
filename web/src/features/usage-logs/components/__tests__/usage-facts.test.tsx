@@ -38,7 +38,10 @@ const i18nKeys = {
   'Usage parameters': 'Usage parameters',
 }
 
-function makeLog(other: LogOtherData): UsageLog {
+function makeLog(
+  other: LogOtherData,
+  overrides: Partial<UsageLog> = {}
+): UsageLog {
   return {
     id: 1,
     user_id: 1,
@@ -51,6 +54,8 @@ function makeLog(other: LogOtherData): UsageLog {
     quota: 5000,
     prompt_tokens: 0,
     completion_tokens: 0,
+    cache_hit_tokens: 0,
+    total_input_tokens: 0,
     use_time: 0,
     is_stream: false,
     channel: 1,
@@ -61,10 +66,14 @@ function makeLog(other: LogOtherData): UsageLog {
     other: JSON.stringify(other),
     request_id: 'req-1',
     upstream_request_id: '',
+    ...overrides,
   }
 }
 
-function renderDetails(other: LogOtherData, promptTokens = 0): QueryClient {
+function renderDetails(
+  other: LogOtherData,
+  overrides: Partial<UsageLog> = {}
+): QueryClient {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -79,7 +88,7 @@ function renderDetails(other: LogOtherData, promptTokens = 0): QueryClient {
   render(
     <QueryClientProvider client={queryClient}>
       <DetailsDialog
-        log={{ ...makeLog(other), prompt_tokens: promptTokens }}
+        log={makeLog(other, overrides)}
         isAdmin={false}
         isRoot={false}
         open
@@ -125,6 +134,41 @@ describe('usage facts billing details', () => {
     expect(screen.getAllByText(/\/image/).length).toBeGreaterThan(0)
     queryClient.clear()
   })
+  test('breaks the input down into fresh, total, cache hit and cache write with the rate', () => {
+    queryClients.push(
+      renderDetails(
+        { cache_creation_tokens: 100 },
+        {
+          total_input_tokens: 1000,
+          cache_hit_tokens: 640,
+          completion_tokens: 50,
+        }
+      )
+    )
+    expect(rowValue('Fresh Input Tokens')).toBe('260')
+    expect(rowValue('Total Input Tokens')).toBe('1,000')
+    expect(rowValue('Cache Hit Tokens')).toBe('640')
+    expect(rowValue('Cache Write Tokens')).toBe('100')
+    expect(rowValue('Cache Hit Rate')).toBe('64%')
+  })
+
+  test('renders the cache hit rate as a dash when no input total was recorded', () => {
+    queryClients.push(
+      renderDetails(
+        { cache_creation_tokens: 100 },
+        {
+          prompt_tokens: 1000,
+          completion_tokens: 10,
+          cache_hit_tokens: 0,
+          total_input_tokens: 0,
+        }
+      )
+    )
+    expect(rowValue('Total Input Tokens')).toBe('0')
+    expect(rowValue('Cache Write Tokens')).toBe('100')
+    expect(rowValue('Cache Hit Rate')).toBe('-')
+  })
+
   const queryClients: QueryClient[] = []
 
   test('shows actual billable image and cache tokens while retaining the aggregate cache count', () => {
@@ -140,7 +184,7 @@ describe('usage facts billing details', () => {
           image_cache_tokens: 200,
           billing_tokens: { p: 300, cr: 100, img: 400, img_cr: 200, c: 100 },
         },
-        1000
+        { prompt_tokens: 1000, cache_hit_tokens: 300, total_input_tokens: 1000 }
       )
     )
     const billable = within(
@@ -156,13 +200,11 @@ describe('usage facts billing details', () => {
       '400'
     )
     expect(
-      screen.getByText('Input Tokens').nextElementSibling
-    ).toHaveTextContent('1,000')
+      screen.getByText('Cache Hit Tokens').nextElementSibling
+    ).toHaveTextContent('300')
     expect(
-      screen
-        .getAllByText('Cache Read')
-        .some((label) => label.nextElementSibling?.textContent === '300')
-    ).toBe(true)
+      screen.getByText('Total Input Tokens').nextElementSibling
+    ).toHaveTextContent('1,000')
   })
 
   beforeAll(() => {

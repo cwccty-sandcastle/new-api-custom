@@ -21,7 +21,8 @@ import { getRouteApi } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 
 import { Skeleton } from '@/components/ui/skeleton'
-import { formatLogQuota } from '@/lib/format'
+import { toIntlLocale } from '@/i18n/languages'
+import { formatCacheHitRate, formatLogQuota } from '@/lib/format'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 
@@ -49,7 +50,8 @@ function StatBadge(props: {
 }
 
 export function CommonLogsStats() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const intlLocale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const { isAdminView: isAdmin } = useLogsViewScope()
   const searchParams = route.useSearch()
   const { sensitiveVisible } = useUsageLogsContext()
@@ -82,9 +84,15 @@ export function CommonLogsStats() {
         <Skeleton className='h-7 w-[150px] rounded-md' />
         <Skeleton className='h-7 w-[100px] rounded-md' />
         <Skeleton className='h-7 w-[120px] rounded-md' />
+        <Skeleton className='h-7 w-[120px] rounded-md' />
       </div>
     )
   }
+
+  // Weighted across the current filters; hidden when nothing produced input
+  // tokens so plots/task partitions do not show a meaningless dash.
+  const totalInputTokens = stats?.total_input_tokens || 0
+  const showCacheHitRate = totalInputTokens > 0
 
   return (
     <div className='flex flex-wrap items-center gap-2'>
@@ -103,6 +111,17 @@ export function CommonLogsStats() {
         value={stats?.tpm || 0}
         accent='bg-slate-400/70'
       />
+      {showCacheHitRate && (
+        <StatBadge
+          label={t('Cache Hit Rate')}
+          value={formatCacheHitRate(
+            stats?.cache_hit_tokens || 0,
+            totalInputTokens,
+            intlLocale
+          )}
+          accent='bg-emerald-500/70'
+        />
+      )}
     </div>
   )
 }

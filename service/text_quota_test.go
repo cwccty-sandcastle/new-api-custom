@@ -90,6 +90,7 @@ func TestFixedPriceBillingDatabaseMatrix(t *testing.T) {
 			require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
 			t.Logf("database: %s", version)
 			runFixedPriceAccountingCases(t, db, logDB)
+			runCacheHitRateCases(t, db, logDB)
 		})
 	}
 }
@@ -1499,4 +1500,231 @@ func TestAppendToolSurchargeLogInfoWritesOnlyStructuredFields(t *testing.T) {
 	assert.NotContains(t, fields, "file_search")
 	assert.NotContains(t, fields, "image_generation_call")
 	assert.NotContains(t, fields, "image_generation_call_price")
+}
+
+func TestCalculateTextQuotaSummaryNormalizesCacheHitRateInputs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	priceData := hosttypes.PriceData{
+		ModelRatio:         1,
+		CompletionRatio:    1,
+		CacheRatio:         0.1,
+		CacheCreationRatio: 1.25,
+		GroupRatioInfo:     hosttypes.GroupRatioInfo{GroupRatio: 1},
+	}
+
+	for _, tc := range []struct {
+		name           string
+		usage          *dto.Usage
+		wantCacheHit   int
+		wantTotalInput int
+	}{
+		{
+			name: "anthropic semantic reports fresh prompt tokens only",
+			usage: &dto.Usage{
+				PromptTokens:        4392,
+				CompletionTokens:    10,
+				UsageSemantic:       "anthropic",
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 3840},
+			},
+			wantCacheHit:   3840,
+			wantTotalInput: 8232,
+		},
+		{
+			name: "anthropic semantic counts cache writes as input",
+			usage: &dto.Usage{
+				PromptTokens:        100,
+				UsageSemantic:       "anthropic",
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 900, CachedCreationTokens: 500},
+			},
+			wantCacheHit:   900,
+			wantTotalInput: 1500,
+		},
+		{
+			name: "legacy claude derived openai usage adds cache writes",
+			usage: &dto.Usage{
+				PromptTokens:                62,
+				PromptTokensDetails:         dto.InputTokenDetails{CachedTokens: 3544},
+				ClaudeCacheCreation5mTokens: 586,
+			},
+			wantCacheHit:   3544,
+			wantTotalInput: 4192,
+		},
+		{
+			name: "openai prompt tokens already include cache reads",
+			usage: &dto.Usage{
+				PromptTokens:        2604,
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 2432},
+			},
+			wantCacheHit:   2432,
+			wantTotalInput: 2604,
+		},
+		{
+			name: "claude usage re-emitted in openai shape is not double counted",
+			usage: &dto.Usage{
+				PromptTokens:        2604,
+				UsageSemantic:       "openai",
+				UsageSource:         "anthropic",
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 2432},
+			},
+			wantCacheHit:   2432,
+			wantTotalInput: 2604,
+		},
+		{
+			name: "cache hits above total input are clamped to a full hit",
+			usage: &dto.Usage{
+				PromptTokens:        100,
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 5000},
+			},
+			wantCacheHit:   5000,
+			wantTotalInput: 5000,
+		},
+		{
+			name:           "request without cache reports zero hits",
+			usage:          &dto.Usage{PromptTokens: 1200},
+			wantCacheHit:   0,
+			wantTotalInput: 1200,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			relayInfo := &relaycommon.RelayInfo{
+				RelayFormat:     types.RelayFormatOpenAI,
+				OriginModelName: "cache-hit-rate-test",
+				PriceData:       priceData,
+				StartTime:       time.Now(),
+			}
+
+			summary := calculateTextQuotaSummary(ctx, relayInfo, tc.usage)
+
+			assert.Equal(t, tc.wantCacheHit, summary.CacheHitTokens)
+			assert.Equal(t, tc.wantTotalInput, summary.TotalInputTokens)
+		})
+	}
+}
+
+// runCacheHitRateCases verifies the cache hit rate columns end to end on one
+// dialect: the consume log carries the normalized values, the log stat sums
+// them, and the dashboard bucket accumulates them across flushes.
+func runCacheHitRateCases(t *testing.T, db, logDB *gorm.DB) {
+	t.Helper()
+
+	oldLogConsumeEnabled, oldDataExportEnabled := common.LogConsumeEnabled, common.DataExportEnabled
+	common.LogConsumeEnabled, common.DataExportEnabled = true, true
+	t.Cleanup(func() {
+		common.LogConsumeEnabled, common.DataExportEnabled = oldLogConsumeEnabled, oldDataExportEnabled
+	})
+
+	model.CacheQuotaDataLock.Lock()
+	model.CacheQuotaData = make(map[string]*model.QuotaData)
+	model.CacheQuotaDataLock.Unlock()
+
+	require.NoError(t, db.AutoMigrate(&model.QuotaData{}))
+
+	user := model.User{Username: "cache_hit_rate_matrix", Quota: 1_000_000, Status: common.UserStatusEnabled}
+	require.NoError(t, db.Create(&user).Error)
+	channel := model.Channel{Name: "cache-hit-rate", Key: "unused", Status: common.ChannelStatusEnabled}
+	require.NoError(t, db.Create(&channel).Error)
+	t.Cleanup(func() {
+		require.NoError(t, logDB.Where("user_id = ?", user.Id).Delete(&model.Log{}).Error)
+		require.NoError(t, db.Where("user_id = ?", user.Id).Delete(&model.QuotaData{}).Error)
+		require.NoError(t, db.Unscoped().Delete(&user).Error)
+		require.NoError(t, db.Unscoped().Delete(&channel).Error)
+	})
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	ctx.Set("username", user.Username)
+
+	logged := []struct {
+		modelName       string
+		cacheHit, total int
+	}{
+		{modelName: "claude-cache", cacheHit: 3544, total: 4192},
+		{modelName: "gpt-cache", cacheHit: 2432, total: 2604},
+	}
+	wantHit, wantTotal := 0, 0
+	for _, tc := range logged {
+		wantHit += tc.cacheHit
+		wantTotal += tc.total
+		model.RecordConsumeLog(ctx, user.Id, model.RecordConsumeLogParams{
+			ChannelId:        channel.Id,
+			PromptTokens:     tc.total,
+			CompletionTokens: 10,
+			CacheHitTokens:   tc.cacheHit,
+			TotalInputTokens: tc.total,
+			ModelName:        tc.modelName,
+			TokenName:        "primary",
+			Quota:            100,
+			Content:          "cache hit rate",
+			Group:            "default",
+			Other:            model.NewLogOther(),
+		})
+	}
+
+	for _, tc := range logged {
+		var log model.Log
+		require.NoError(t, logDB.Where("user_id = ? and model_name = ?", user.Id, tc.modelName).Take(&log).Error)
+		require.Equal(t, tc.cacheHit, log.CacheHitTokens)
+		require.Equal(t, tc.total, log.TotalInputTokens)
+	}
+
+	stat, err := model.SumUsedQuota(model.LogTypeConsume, 0, 0, "", user.Username, "", 0, "")
+	require.NoError(t, err)
+	require.Equal(t, wantHit, stat.CacheHitTokens)
+	require.Equal(t, wantTotal, stat.TotalInputTokens)
+
+	// The dashboard bucket key includes an explicit created_at, so use a fixed
+	// hour here to exercise both the insert and the accumulate branches.
+	model.CacheQuotaDataLock.Lock()
+	model.CacheQuotaData = make(map[string]*model.QuotaData)
+	model.CacheQuotaDataLock.Unlock()
+	const bucket = int64(7200)
+	bucketParams := model.QuotaDataLogParams{
+		UserID:           user.Id,
+		Username:         user.Username,
+		ModelName:        "bucket-model",
+		CreatedAt:        bucket,
+		UseGroup:         "default",
+		TokenID:          0,
+		ChannelID:        channel.Id,
+		CacheHitTokens:   wantHit,
+		TotalInputTokens: wantTotal,
+		Quota:            100,
+		TokenUsed:        20,
+	}
+	model.LogQuotaData(bucketParams)
+	model.SaveQuotaDataCache()
+	model.LogQuotaData(bucketParams)
+	model.SaveQuotaDataCache()
+
+	var buckets []model.QuotaData
+	require.NoError(t, db.Where("user_id = ? and created_at = ?", user.Id, bucket).Find(&buckets).Error)
+	require.Len(t, buckets, 1)
+	require.Equal(t, 2, buckets[0].Count)
+	require.Equal(t, 2*wantHit, buckets[0].CacheHitTokens)
+	require.Equal(t, 2*wantTotal, buckets[0].TotalInputTokens)
+
+	// The dashboard read path must aggregate the same two columns.
+	readRows, err := model.GetQuotaDataByUserId(user.Id, 0, bucket+1)
+	require.NoError(t, err)
+	readHit, readTotal := 0, 0
+	for _, row := range readRows {
+		readHit += row.CacheHitTokens
+		readTotal += row.TotalInputTokens
+	}
+	require.Equal(t, 2*wantHit, readHit)
+	require.Equal(t, 2*wantTotal, readTotal)
+
+	// Re-running the schema migration must be idempotent and keep existing rows.
+	require.NoError(t, logDB.AutoMigrate(&model.Log{}))
+	require.NoError(t, db.AutoMigrate(&model.QuotaData{}))
+	var preserved model.Log
+	require.NoError(t, logDB.Where("user_id = ? and model_name = ?", user.Id, logged[0].modelName).Take(&preserved).Error)
+	require.Equal(t, logged[0].cacheHit, preserved.CacheHitTokens)
+	require.Equal(t, logged[0].total, preserved.TotalInputTokens)
+	var preservedBucket model.QuotaData
+	require.NoError(t, db.Where("user_id = ? and created_at = ?", user.Id, bucket).Take(&preservedBucket).Error)
+	require.Equal(t, 2*wantHit, preservedBucket.CacheHitTokens)
+	require.Equal(t, 2*wantTotal, preservedBucket.TotalInputTokens)
 }

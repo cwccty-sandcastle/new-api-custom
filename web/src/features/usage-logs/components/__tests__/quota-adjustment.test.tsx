@@ -168,6 +168,8 @@ describe('quota adjustment log localization', () => {
         quota: 0,
         prompt_tokens: 0,
         completion_tokens: 0,
+        cache_hit_tokens: 0,
+        total_input_tokens: 0,
         use_time: 0,
         is_stream: false,
         channel: 0,

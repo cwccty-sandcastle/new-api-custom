@@ -62,8 +62,14 @@ import { BILLING_PRICING_VARS } from '@/features/pricing/lib/billing-expr'
 import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { PolicyDecisionRecord } from '@/features/system-settings/request-policies/decision-record'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { toIntlLocale } from '@/i18n/languages'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
-import { formatLogQuota, formatTokens, formatUseTime } from '@/lib/format'
+import {
+  formatCacheHitRate,
+  formatLogQuota,
+  formatTokens,
+  formatUseTime,
+} from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import { AuditDetailFields } from '../../audit/components/audit-detail-fields'
@@ -371,31 +377,77 @@ function BillingBreakdown(props: {
 }
 
 function TokenBreakdown(props: { log: UsageLog; other: LogOtherData }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const intlLocale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const { log, other } = props
 
   const promptTokens = log.prompt_tokens || 0
   const completionTokens = log.completion_tokens || 0
-  const cacheRead = other.cache_tokens || 0
+  const cacheHitTokens = log.cache_hit_tokens || 0
+  const totalInputTokens = log.total_input_tokens || 0
   const cacheWrite = other.cache_creation_tokens || 0
   const cacheWrite5m = other.cache_creation_tokens_5m || 0
   const cacheWrite1h = other.cache_creation_tokens_1h || 0
-  const hasTokens = promptTokens > 0 || completionTokens > 0
+  const cacheWriteTokens =
+    cacheWrite5m > 0 || cacheWrite1h > 0
+      ? cacheWrite5m + cacheWrite1h
+      : cacheWrite
+  const hasTokens =
+    promptTokens > 0 ||
+    completionTokens > 0 ||
+    cacheHitTokens > 0 ||
+    totalInputTokens > 0
 
   if (!hasTokens) return null
 
+  // Fresh input is the total input minus what the prompt cache read or wrote.
+  // Both are backend-normalized totals, so clamping protects legacy rows and
+  // upstream anomalies from showing a negative count.
+  const freshInputTokens = Math.max(
+    0,
+    totalInputTokens - cacheHitTokens - cacheWriteTokens
+  )
+  const hasCacheTokens = cacheHitTokens > 0 || cacheWriteTokens > 0
+
   const rows: Array<{ label: string; value: string }> = []
 
-  rows.push({ label: t('Input Tokens'), value: promptTokens.toLocaleString() })
+  rows.push({
+    label: t('Fresh Input Tokens'),
+    value: freshInputTokens.toLocaleString(),
+  })
+  rows.push({
+    label: t('Total Input Tokens'),
+    value: totalInputTokens.toLocaleString(),
+  })
   rows.push({
     label: t('Output Tokens'),
     value: completionTokens.toLocaleString(),
   })
 
-  if (cacheRead > 0) {
+  if (hasCacheTokens) {
     rows.push({
-      label: t('Cache Read'),
-      value: cacheRead.toLocaleString(),
+      label: t('Cache Hit Tokens'),
+      value: cacheHitTokens.toLocaleString(),
+    })
+    rows.push({
+      label: t('Cache Write Tokens'),
+      value: cacheWriteTokens.toLocaleString(),
+    })
+    if (cacheWrite5m > 0) {
+      rows.push({
+        label: t('Cache Write (5m)'),
+        value: cacheWrite5m.toLocaleString(),
+      })
+    }
+    if (cacheWrite1h > 0) {
+      rows.push({
+        label: t('Cache Write (1h)'),
+        value: cacheWrite1h.toLocaleString(),
+      })
+    }
+    rows.push({
+      label: t('Cache Hit Rate'),
+      value: formatCacheHitRate(cacheHitTokens, totalInputTokens, intlLocale),
     })
   }
 
@@ -403,27 +455,6 @@ function TokenBreakdown(props: { log: UsageLog; other: LogOtherData }) {
     rows.push({
       label: t('Image Cache'),
       value: other.image_cache_tokens.toLocaleString(),
-    })
-  }
-
-  if (cacheWrite > 0 && cacheWrite5m === 0 && cacheWrite1h === 0) {
-    rows.push({
-      label: t('Cache Write'),
-      value: cacheWrite.toLocaleString(),
-    })
-  }
-
-  if (cacheWrite5m > 0) {
-    rows.push({
-      label: t('Cache Write (5m)'),
-      value: cacheWrite5m.toLocaleString(),
-    })
-  }
-
-  if (cacheWrite1h > 0) {
-    rows.push({
-      label: t('Cache Write (1h)'),
-      value: cacheWrite1h.toLocaleString(),
     })
   }
 

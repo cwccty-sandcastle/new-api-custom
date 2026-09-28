@@ -42,6 +42,8 @@ type textQuotaSummary struct {
 	TotalTokens            int
 	CacheTokens            int
 	CacheCreationTokens    int
+	CacheHitTokens         int
+	TotalInputTokens       int
 	CacheCreationTokens5m  int
 	CacheCreationTokens1h  int
 	ImageTokens            int
@@ -277,6 +279,25 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 			}
 		}
 		summary.PromptTokens -= summary.CacheCreationTokens
+	}
+
+	// Cache hit rate inputs for the consume log: hit tokens over normalized total
+	// input (fresh + hit + write). Claude semantics report fresh-only prompt
+	// tokens, so read and write must be added back; OpenAI/Gemini prompt tokens
+	// are already inclusive. The branch condition mirrors the billing branches
+	// above, which also keeps this equal to the InputTokens normalization applied
+	// when Claude usage is re-emitted in OpenAI shape.
+	summary.CacheHitTokens = summary.CacheTokens
+	summary.TotalInputTokens = summary.PromptTokens
+	if summary.IsClaudeUsageSemantic || legacyClaudeDerived {
+		summary.TotalInputTokens += summary.CacheTokens + cacheWriteTokensTotal(summary)
+	}
+	if summary.TotalInputTokens < summary.CacheHitTokens {
+		common.SysError(fmt.Sprintf(
+			"cache hit tokens exceed total input tokens, clamping logged rate: userId %d, model %s, hit %d, total %d",
+			relayInfo.UserId, summary.ModelName, summary.CacheHitTokens, summary.TotalInputTokens,
+		))
+		summary.TotalInputTokens = summary.CacheHitTokens
 	}
 
 	dPromptTokens := decimal.NewFromInt(int64(summary.PromptTokens))
@@ -537,6 +558,8 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		ChannelId:        relayInfo.ChannelId,
 		PromptTokens:     summary.PromptTokens,
 		CompletionTokens: summary.CompletionTokens,
+		CacheHitTokens:   summary.CacheHitTokens,
+		TotalInputTokens: summary.TotalInputTokens,
 		ModelName:        logModel,
 		TokenName:        summary.TokenName,
 		Quota:            summary.Quota,

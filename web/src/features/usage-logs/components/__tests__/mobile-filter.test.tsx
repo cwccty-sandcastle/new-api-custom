@@ -70,7 +70,7 @@ function Fixture() {
     </UsageLogsProvider>
   )
 }
-async function renderMobileFilter() {
+async function renderMobileFilter(stats?: Record<string, number>) {
   const original = window.matchMedia
   vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
     ...original(query),
@@ -79,7 +79,10 @@ async function renderMobileFilter() {
   vi.spyOn(api, 'get').mockImplementation(async (url) => ({
     data: {
       success: true,
-      data: url === '/api/user/self/groups' ? {} : { quota: 0, rpm: 0, tpm: 0 },
+      data:
+        url === '/api/user/self/groups'
+          ? {}
+          : { quota: 0, rpm: 0, tpm: 0, ...stats },
     },
   }))
   const root = createRootRoute()
@@ -110,6 +113,18 @@ async function renderMobileFilter() {
   await screen.findByRole('button', { name: 'Filter' })
   return router
 }
+
+it('hides the cache hit rate stat when no input tokens were recorded', async () => {
+  await renderMobileFilter()
+  expect(screen.queryByText('Cache Hit Rate')).not.toBeInTheDocument()
+})
+
+it('shows the token-weighted cache hit rate stat for the active filters', async () => {
+  await renderMobileFilter({ cache_hit_tokens: 640, total_input_tokens: 1000 })
+  expect(await screen.findByText('Cache Hit Rate')).toBeVisible()
+  expect(screen.getByText('64%')).toBeVisible()
+})
+
 afterEach(async () => {
   if (captureDescriptor) {
     Object.defineProperty(

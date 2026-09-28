@@ -58,6 +58,40 @@ export function formatPercent(value: number | null | undefined): string {
   }).format((value as number) / 100)
 }
 
+/**
+ * Cache hit rate as a percentage (0-100), or null when there is no input to
+ * measure. Callers must pass summed hit/total tokens for aggregates so the
+ * result stays token-weighted instead of averaging per-request rates. Hit
+ * tokens reported above the total are clamped so the rate never exceeds 100%.
+ */
+export function getCacheHitRate(
+  cacheHitTokens: number | null | undefined,
+  totalInputTokens: number | null | undefined
+): number | null {
+  const total = Number(totalInputTokens) || 0
+  if (total <= 0) return null
+  const hit = Math.min(Math.max(Number(cacheHitTokens) || 0, 0), total)
+  return (hit / total) * 100
+}
+
+/**
+ * Format a cache hit rate for display. Renders '-' when there is no input to
+ * measure (never '0%'), and '0%' when input exists but nothing was cached.
+ * Values below 100 keep one decimal, 100 is shown as an integer.
+ */
+export function formatCacheHitRate(
+  cacheHitTokens: number | null | undefined,
+  totalInputTokens: number | null | undefined,
+  locales?: Intl.LocalesArgument
+): string {
+  const rate = getCacheHitRate(cacheHitTokens, totalInputTokens)
+  if (rate == null) return '-'
+  return Intl.NumberFormat(locales, {
+    style: 'percent',
+    maximumFractionDigits: rate < 100 ? 1 : 0,
+  }).format(rate / 100)
+}
+
 export function formatCurrencyUSD(value: number | null | undefined): string {
   return formatCurrencyFromUSD(value == null ? null : (value as number))
 }

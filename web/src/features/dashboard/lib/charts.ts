@@ -25,6 +25,7 @@ import type {
   ProcessedUserChartData,
 } from '@/features/dashboard/types'
 import { getCurrencyDisplay } from '@/lib/currency'
+import { formatCacheHitRate, getCacheHitRate } from '@/lib/format'
 import { formatChartTime, type TimeGranularity } from '@/lib/time'
 
 type TFunction = (key: string) => string
@@ -65,13 +66,153 @@ function renderQuotaCompat(rawQuota: number, digits = 4): string {
 }
 
 /**
+ * Build the hourly cache-hit-rate chart: a rate line over hit/total input
+ * token bars, sharing one time axis. The rate is token-weighted per hour, so
+ * an hour with no input tokens has no defined rate and is omitted, leaving a
+ * gap in the line rather than a misleading 0%.
+ */
+export function buildCacheHitRateChartSpec(
+  data: QuotaDataItem[],
+  t?: TFunction,
+  locale?: Intl.LocalesArgument
+): ProcessedChartData['spec_cache_hit_rate'] {
+  const tt: TFunction = t ?? ((x) => x)
+  const hitLabel = tt('Cache Hit Tokens')
+  const totalLabel = tt('Total Input Tokens')
+  const rateLabel = tt('Cache Hit Rate')
+
+  const hourly = new Map<string, { hit: number; total: number }>()
+  data.forEach((item) => {
+    const timeKey = formatChartTime(Number(item.created_at) || 0, 'hour')
+    const bucket = hourly.get(timeKey) ?? { hit: 0, total: 0 }
+    bucket.hit += Number(item.cache_hit_tokens) || 0
+    bucket.total += Number(item.total_input_tokens) || 0
+    hourly.set(timeKey, bucket)
+  })
+
+  const sortedTimes = [...hourly.keys()].sort()
+  const volumeValues: Array<{ Time: string; Metric: string; Value: number }> =
+    []
+  const rateValues: Array<{
+    Time: string
+    Metric: string
+    HitRate: number
+    Hit: number
+    Total: number
+  }> = []
+  sortedTimes.forEach((time) => {
+    const bucket = hourly.get(time)
+    if (!bucket) return
+    volumeValues.push({ Time: time, Metric: hitLabel, Value: bucket.hit })
+    volumeValues.push({ Time: time, Metric: totalLabel, Value: bucket.total })
+    const rate = getCacheHitRate(bucket.hit, bucket.total)
+    if (rate != null) {
+      rateValues.push({
+        Time: time,
+        Metric: rateLabel,
+        HitRate: rate,
+        Hit: bucket.hit,
+        Total: bucket.total,
+      })
+    }
+  })
+
+  const formatInt = (value: number) =>
+    Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(value)
+  const palette = getDashboardChartColors(3)
+
+  return {
+    type: 'common',
+    data: [
+      { id: 'cacheVolumes', values: volumeValues },
+      { id: 'cacheRate', values: rateValues },
+    ],
+    series: [
+      {
+        type: 'bar',
+        dataId: 'cacheVolumes',
+        xField: 'Time',
+        yField: 'Value',
+        seriesField: 'Metric',
+        bar: { style: { fillOpacity: 0.85 } },
+        tooltip: {
+          mark: {
+            content: [
+              {
+                key: (datum: { Metric: string }) => datum?.Metric,
+                value: (datum: { Value: number }) =>
+                  formatInt(Number(datum?.Value) || 0),
+              },
+            ],
+          },
+        },
+      },
+      {
+        type: 'line',
+        dataId: 'cacheRate',
+        xField: 'Time',
+        yField: 'HitRate',
+        // Naming the series keeps VChart from showing its generated series id
+        // (for example "line_921") in the legend.
+        seriesField: 'Metric',
+        point: { visible: true, style: { fill: palette[2] } },
+        line: { style: { lineWidth: 2, stroke: palette[2] } },
+        tooltip: {
+          mark: {
+            content: [
+              {
+                key: rateLabel,
+                value: (datum: { Hit: number; Total: number }) =>
+                  formatCacheHitRate(
+                    Number(datum?.Hit) || 0,
+                    Number(datum?.Total) || 0,
+                    locale
+                  ),
+              },
+            ],
+          },
+        },
+      },
+    ],
+    axes: [
+      { orient: 'bottom', type: 'band' },
+      { orient: 'left', type: 'linear', seriesIndex: [0] },
+      {
+        orient: 'right',
+        type: 'linear',
+        seriesIndex: [1],
+        label: {
+          formatMethod: (value: number) => `${formatInt(value)}%`,
+        },
+      },
+    ],
+    legends: { visible: true, orient: 'top' },
+    color: {
+      type: 'ordinal',
+      domain: [hitLabel, totalLabel, rateLabel],
+      range: palette,
+    },
+    title:
+      rateValues.length === 0
+        ? {
+            visible: true,
+            text: rateLabel,
+            subtext: tt('No data available'),
+          }
+        : { visible: false },
+    background: { fill: 'transparent' },
+  }
+}
+
+/**
  * Process and aggregate chart data
  */
 export function processChartData(
   data: QuotaDataItem[],
   timeGranularity: TimeGranularity = 'day',
   t?: TFunction,
-  chartCornerRadius?: number
+  chartCornerRadius?: number,
+  locale?: Intl.LocalesArgument
 ): ProcessedChartData {
   const tt: TFunction = t ?? ((x) => x)
   const otherLabel = tt('Other')
@@ -209,6 +350,7 @@ export function processChartData(
       },
       totalQuotaDisplay: formatQuotaTotal(0),
       totalCountDisplay: formatInt(0),
+      spec_cache_hit_rate: buildCacheHitRateChartSpec([], tt, locale),
     }
   }
 
@@ -685,6 +827,7 @@ export function processChartData(
     },
     totalQuotaDisplay: formatQuotaTotal(totalQuotaRaw),
     totalCountDisplay: formatInt(totalTimes),
+    spec_cache_hit_rate: buildCacheHitRateChartSpec(data, tt, locale),
   }
 }
 
